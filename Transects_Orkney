@@ -1,0 +1,323 @@
+!/usr/bin/env /home/gmm/Enthought/Canopy_64bit/User/bin/python2.7
+
+from mpl_toolkits.basemap import Basemap
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.dates import YearLocator, MonthLocator, DateFormatter, date2num
+import datetime
+import netCDF4
+import seawater as sw
+import scipy.ndimage
+import scipy.io as sio
+import sys,os
+from misc_gis import *
+#import xray
+import pandas as pd
+#from pygamman import gamman as nds
+#sys.path.append("/net/gmm/Projects/DynOPO/")
+
+#execfile('/net/gmm/Projects/DynOPO/plt_functions.py')
+
+def get_transp(uh,vh,q,px,py):
+    """
+    Compute the total transport accross a section. Transport is positive to the right of the section.
+    """
+    if q == 'EW':
+       transp = vh.mean(axis=1)
+    elif q == 'NS':
+       transp = uh.mean(axis=1)
+    elif q == 'Q1':
+       transp = uh.mean(axis=1) - vh.mean(axis=1)
+    elif q == 'Q2':
+       transp = uh.mean(axis=1) + vh.mean(axis=1)
+    else:
+        print 'Error! You need to specify a valid transport option!'
+
+    return transp
+
+# potenial density
+def sigma2(T,S,p):
+    #p0=2.0e7 # ref pressure at 2000m, in decibars
+
+    a0 = 7.057924e-4; a1 = 3.480336e-7; a2 = -1.112733e-7;
+    b0 = 5.790749e8; b1 = 3.516535e6; b2 = -4.002714e4;
+    b3 = 2.084372e2; b4 = 5.944068e5; b5 = -9.643486e3;
+    c0 = 1.704853e5; c1 = 7.904722e2; c2 = -7.984422;
+    c3 = 5.140652e-2; c4 = -2.302158e2; c5 = -3.079464;
+
+    al0 = a0 + a1*T + a2*S;
+    p0 = b0 + b4*S + T*(b1 + T*(b2 + b3*T) + b5*S);
+    lam = c0 + c4*S + T*(c1 + T*(c2 + c3*T) + c5*S);
+    l_denom = 1.0/(lam + al0*(p+p0));
+    out = (p + p0)* l_denom;
+    return out
+
+def checkDensityBins(bins,sig2):
+    return np.argmin(np.abs(bins-sig2))
+
+def plt_sec(x,z,var1,title,varname,varunits,levs,date,xlab,ind,mymap=plt.cm.nipy_spectral):
+    """ Function to plot cross-sections.... """
+    if not os.path.exists(title):
+       os.system('mkdir '+ title)
+    
+    z1=0.5*(z[0:-1,0:-1]+z[1::,1::])
+    tmp1=0.5*(x[0:-1]+x[1::])
+    [x1,tmp2]=np.meshgrid(tmp1,z1[:,0])
+
+    fig = plt.figure()
+    ax = fig.add_subplot(111,axisbg='gray')
+    cm=ax.pcolormesh(x,z,var1,cmap=mymap,vmin=levs.min(),vmax=levs.max(),shading='flat')
+    cbar=plt.colorbar(cm,orientation='horizontal')
+
+    cbar.set_label(r'%s %s' % (varname,varunits))
+    ax.set_title(r'%s - %s' % (title,date))
+    ax.set_xlabel(r'%s' % (xlab))
+    ax.set_xlim(x.min(),x.max())
+    ax.set_ylim(z.min(),0.5)
+    ax.set_ylabel('Depth [m]')
+    plt.grid()
+    plt.tight_layout()
+    s = str("plt.savefig('%s/%s-%04d.png',bbox_inches='tight')"% (title,varname,ind))
+    eval(s)
+    plt.close('all')
+    return
+
+
+exp = 'shelfthermo0d'
+print 'Processing exp:',exp + '...'
+
+ocean_path='/archive/mjh/fre/ulm_prerelease/GIS_0125_LM3_SIS/GIS_0125_LM3_SIS_shelfthermo0d/gfdl.ncrc2-default-prod/pp/ocean/ts/monthly/1yr/'
+
+# domain
+lat1=-63.00001; lat2=-59.00001
+lon1=-44.50001; lon2=-35.50001
+# get data for this region
+grid,region=get_region_grid(lon1,lon2,lat1,lat2)
+lonqs, latqs = np.meshgrid(grid.lonq,grid.latq)
+lons, lats = np.meshgrid(grid.lonh,grid.lath)
+lons_bounds = grid.x_T_bounds
+lats_bounds = grid.y_T_bounds
+D=grid.D
+D=np.ma.masked_where(D <= 1, D)
+
+#fig=plt.figure(2,figsize=(12,10))
+#ax=fig.add_axes([0.1,0.1,0.8,0.8])
+#m = Basemap(projection='cyl',llcrnrlat=lats.min(),urcrnrlat=lats.max(),llcrnrlon=lons.min(),urcrnrlon=lons.max(),lat_ts=0,resolution='c')
+# compute map projection coordinates for lat/lon grid.
+#x, y = m(lons,lats)
+#m.contourf(x,y,D,np.linspace(D.min(),D.max(),50),cmap=plt.cm.terrain)
+#m.contourf(x,y,D,np.linspace(D.min(),D.max(),50),cmap=plt.cm.Blues)
+#m.drawcoastlines()
+#m.fillcontinents()
+# draw parallels
+#m.drawparallels(np.arange(-90,-10,20),labels=[1,1,0,1])
+# draw meridians
+#m.drawmeridians(np.arange(-180,180,30),labels=[1,1,0,1])
+#ax.set_title('Study Region')
+#plt.tight_layout
+#plt.savefig('study_region.png')
+#plt.close()
+#plt.show()
+
+dlevs=np.linspace(0,6000,30)
+
+#plt.figure()
+#plt.contourf(lons,lats,D,dlevs,cmap=plt.cm.afmhot_r)
+#plt.colorbar()
+#plt.contour(lons,lats,D,[100,500,1000,2000,3000,5000],colors='k')
+#plt.show()
+
+tlevs=np.linspace(-1.9,1.6,50) #-1.9 2.0 50 #done
+slevs=np.linspace(34.3,34.75,50)
+rlevs=np.linspace(36.6,37.3,50) #done
+qlevs=np.linspace(-2.0,2.0,50) #done -.45 .45
+
+# points for transects
+pts=[]
+# Transect #1 (T1)
+pts.append({'name':'T1','lat1':-61.7399,'lat2':-61.739, 'lon1':-42.0817,'lon2':-36.7034, 'orien':'EW', 'tlev':tlevs, 'slev':slevs, 'rlev':rlevs,'qlev':qlevs})
+# Transect #2 (T2) 
+pts.append({'name':'T2','lat1':-60.5001,'lat2':-60.502,'lon1':-43.0001,'lon2':-37.4001, 'orien':'EW', 'tlev':tlevs, 'skev':slevs, 'rkev':rlevs,'qlev':qlevs})
+
+# find points between lat1/lon1 and lat2/lon2
+ind=0;
+for pt in pts:
+    # get near grid point
+    j0, i0 = near2d(lons, lats, pt['lon1'], pt['lat1'])
+    j1, i1 = near2d(lons, lats, pt['lon2'], pt['lat2'])
+    pts[ind]['j0']=j0;pts[ind]['j1']=j1;pts[ind]['i0']=i0;pts[ind]['i1']=i1
+    # model grid points following transects
+    py,px = section_path(j0, j1,i0,i1)
+    py_bounds = np.append(py,py[-1]-1)
+    px_bounds = np.append(px,px[-1]-1)
+    pts[ind]['px']=px; pts[ind]['py']=py
+    pts[ind]['px_bounds']=px_bounds; pts[ind]['py_bounds']=py_bounds
+    # Extract the values along the line, using cubic interpolation
+    #dist,angle=sw.dist([lats[j0, i0],lats[j1, i1]],[lons[j0, i0],lons[j1, i1]])
+    dist,angle=sw.dist(lats[py, px],lons[py,px])
+    dist_bounds,angle=sw.dist(lats_bounds[py_bounds, px_bounds],lons_bounds[py_bounds,px_bounds])
+    zi = scipy.ndimage.map_coordinates(D, np.vstack((py,px)))
+    zi = 0.5*(zi[0:-1]+zi[1::])
+    pts[ind]['zi']=zi; pts[ind]['dist']=dist; pts[ind]['dist_bounds']=dist_bounds
+
+    #from here this was unindented and in a sepparate loop
+    fig = plt.figure(2,figsize=(12,10))
+    ax = fig.add_subplot(111,axisbg='gray')
+    cm=ax.contourf(lons,lats,D,np.linspace(D.min(),D.max(),50),cmap=plt.cm.Blues)
+    
+    
+    plt.contour(lons,lats,D,[500, 1000, 2000],linewidths=2,colors='k')
+    plt.plot([lons[pt['j0'], pt['i0']],lons[pt['j1'], pt['i1']]], [lats[pt['j0'], pt['i0']],lats[pt['j1'], pt['i1']]], color='r',linewidth=5)
+
+    #until here
+    ind=ind+1
+###
+#fig = plt.figure(2,figsize=(12,10))
+#ax = fig.add_subplot(111,axisbg='gray')
+#cm=ax.contourf(lons,lats,D,np.linspace(D.min(),D.max(),50),cmap=plt.cm.Blues)
+cbar=plt.colorbar(cm)
+cbar.set_label('Depth [m]')
+#plt.contour(lons,lats,D,[500, 1000, 2000],linewidths=2,colors='k')
+#for pt in pts:
+#    plt.plot([lons[pt['j0'], pt['i0']],lons[pt['j1'], pt['i1']]], [lats[pt['j0'], pt['i0']],lats[pt['j1'], pt['i1']]], color='r',linewidth=5)
+#    #plt.text(lons[pt['j1'], pt['i1']].mean(), lats[pt['j1'], pt['i1']].mean(),pt['name'], fontsize=12,bbox=dict(facecolor='red', alpha=0.5))
+###
+
+#ax.set_xlim(-88,-19)
+#ax.set_ylim(-82,-53)
+ax.set_title('Transects')
+ax.set_xlabel('Lon')
+ax.set_ylabel('Lat')
+plt.savefig('transects.png')
+#plt.show()
+
+#ind=1
+#fig = plt.figure(3,figsize=(12,10))
+#for pt in pts:
+#    ax = fig.add_subplot(len(pts),1,ind)
+#    ax.plot(pt['dist'],-pt['zi'])
+#    ax.set_title(pt['name'])
+#    ax.set_ylabel('Depth [m]')
+#    if ind==len(pts): 
+#        ax.set_xlabel('Distance [km]')
+#
+#    ind=ind+1
+#
+#plt.show()
+
+# load variables
+S=state(MFpath=ocean_path+'*.temp.nc',grid=get_grid(),geo_region=region,fields=['time'],verbose=False)
+time=S.time[:,0,0,0] ## days since 1992-01-01 00:00:00
+t0=datetime.datetime(1992,1,1)
+
+#time = time[0:2]
+tm=len(time)
+
+# read Layer Target Potential Density
+zl=netCDF4.MFDataset(ocean_path+'*.temp.nc').variables['zl'][:]
+
+# initialize variables, these arrays will represent the mean values in the transects (within gamma1 and gamma2)
+ind=0
+for pt in pts:
+    pts[ind]['transport_mean']=np.zeros((len(time),len(zl)))
+    ind=ind+1
+
+time_all=[]
+
+ind=0
+# loop through time and plot surface fields
+or t in range(len(time)):
+        binval = 0
+        date = t0 + datetime.timedelta(days=time[t])
+        time_all.append(date2num(date))
+        date = date.strftime("%Y-%m-%d")
+        print 'Date is:',date
+        # read data
+        S1=state(MFpath=ocean_path+'*.h.nc',grid=get_grid(),geo_region=region,time_indices=[t],fields=['h'],verbose=False)
+        hall=S1.h[0,:,:,:]; eall = get_interfaces(hall,D)
+        S2=state(MFpath=ocean_path+'*.temp.nc',grid=get_grid(),geo_region=region,time_indices=[t],fields=['temp'],verbose=False)
+        S3=state(MFpath=ocean_path+'*.salt.nc',grid=get_grid(),geo_region=region,time_indices=[t],fields=['salt'],verbose=False)
+        S4=state(MFpath=ocean_path+'*.uh.nc',grid=get_grid(),geo_region=region,time_indices=[t],fields=['uh'],verbose=False)
+        S5=state(MFpath=ocean_path+'*.vh.nc',grid=get_grid(),geo_region=region,time_indices=[t],fields=['vh'],verbose=False)
+
+        ind1 = 0
+        for i in range(len(pts)):
+           # e=S1.e[0,:,pts[i]['px'],pts[i]['py']].T #layer thickness (for monthly snap)
+            temp=S2.temp[0,:,pts[i]['py'],pts[i]['px']].T # temp
+            salt=S3.salt[0,:,pts[i]['py'],pts[i]['px']].T # salt
+            uh = S4.uh[0,:,pts[i]['py'],pts[i]['px']].T/1.0e6 # in sv
+            vh = S5.vh[0,:,pts[i]['py'],pts[i]['px']].T/1.0e6 # in sv
+            e=eall[:,pts[i]['py'],pts[i]['px']] #layers
+            h=hall[:,pts[i]['py'],pts[i]['px']] #thickness
+            depth=0.5*(e[0:-1,:]+e[1::,:]) #depth
+            depth=np.ma.masked_where(depth<-1.e10, depth)
+            # densities
+            sig2 = sigma2(temp,salt,2.0e7)-1000.0
+
+            # quadmesh coordinates, for plotting
+            if pts[i]['orien']=='NS':
+                NS = lats[pts[i]['py'],pts[i]['px']]; NS=np.append(NS, NS[-1]) # this is to use quadmesh
+                X1,Z1,T1=section2quadmesh(NS,e, temp, representation='plm')# I am not sure if that is the best way
+                X1,Z1,SS1=section2quadmesh(NS,e, salt, representation='plm')
+                X1,Z1,uh1=section2quadmesh(NS,e, uh, representation='plm')
+                X1,Z1,rho1=section2quadmesh(NS,e, sig2, representation='plm')
+                # apply masks, this needs to be done when plotting under ice shelves
+                Z1 = np.ma.masked_where(Z1<-1.e10,Z1)
+
+                plt_sec(-X1,Z1,T1,pts[i]['name'],'Temp','[$^o$C]',pts[i]['tlev'],date,'Lat S',ind,mymap=plt.cm.jet)
+                plt_sec(-X1,Z1,SS1,pts[i]['name'],'Salt','[PSU]',slevs,date,'Lat S',ind)
+                plt_sec(-X1,Z1,uh1,pts[i]['name'],'UH','[sv]',trlevs,date,'Lat S',ind,mymap=plt.cm.bwr)
+                plt_sec(X1,Z1,rho1,pts[i]['name'],'Sigma2','[kg m$^{-3}$]',rlevs,date,'Lat S',ind)
+
+            else:
+                EW = lons[pts[i]['py'],pts[i]['px']]; EW=np.append(EW, EW[-1]) # this is to use quadmesh
+                X1,Z1,T1=section2quadmesh(EW,e, temp, representation='plm')
+                X1,Z1,SS1=section2quadmesh(EW,e, salt, representation='plm')
+                X1,Z1,vh1=section2quadmesh(EW,e, vh, representation='plm')
+                X1,Z1,rho1=section2quadmesh(EW,e, sig2, representation='plm')
+
+                # apply masks, this needs to be done when plotting under ice shelves
+                Z1 = np.ma.masked_where(Z1<-1.e10,Z1)
+
+                plt_sec(X1,Z1,T1,pts[i]['name'],'Temp','[$^o$C]',pts[i]['tlev'],date,'Lon E',ind,mymap=plt.cm.jet)
+                plt_sec(X1,Z1,SS1,pts[i]['name'],'Salt','[PSU]',slevs,date,'Lon E',ind,)
+                plt_sec(X1,Z1,vh1,pts[i]['name'],'VH','[sv]',qlevs,date,'Lon E',ind,mymap=plt.cm.bwr)
+                plt_sec(X1,Z1,rho1,pts[i]['name'],'Sigma2','[kg m$^{-3}$]',rlevs,date,'Lon E',ind)
+
+
+           # manually computed bins for density
+
+            bins = np.array([0.0, 1033.1636962890625, 1036.5576171875, 1037.001953125, 1037.083984375, 1037.1005859375, 1037.1146240234375, 1037.1292724609375, 1037.14794921875, 1037.1588134765625,1037.169, 1037.179, 1037.189, 137.199, 999999999.99])
+            bins = bins - 1000
+            transports = np.zeros(len(bins-1))
+
+            tickmarks = np.array(['0 - 33.164', '33.164 - 36.558', '36.558 - 37.002', '37.002 - 37.084', '37.084 - 37.101', '37.101 - 37.115', '37.115 - 37.129', '37.129 - 37.148', '37.148 - 37.159', '37.159 - 37.169', '37.169 - 37.179','37.179 - 37.189', '37.189 - 37.199',' 37.199+', 'lol'])
+
+            for xmatrix in range(sig2.shape[0]):
+                for ymatrix in range(sig2.shape[1]):
+                    if binval < len(transports) - 1:
+                        binval=checkDensityBins(bins,sig2[xmatrix, ymatrix])
+                        transports[binval] = transports[binval] + vh[xmatrix, ymatrix]
+                        #are there less than 33.164?
+                        #if sig2[xmatrix, ymatrix] < 33.1636962890625:
+                            #print('YES',sig2,vh[xmatrix, ymatrix])
+                        #print(binval)  
+            #print(binval)
+            nameno = ind + 1 #name number          
+
+            plt.figure(figsize=(8,6), dpi=300)
+            #plt.bar(np.arange(len(bins))+0.01,transports,0.1)
+            plt.barh(width=transports, bottom=np.arange(len(bins))+0.01, height=0.5, tick_label=tickmarks)
+            #plt.gca().invert_yaxis()
+            plt.ylim([0, 14])
+            plt.xlim([-0.5, 5.0])
+            plt.ylabel('Potential density')
+            plt.xlabel('Transport')
+            plt.title(date)
+            plt.gca().invert_yaxis()
+            plt.savefig(pts[i]['name']  + '/' + date + '.png',format='png',dpi=300,bbox_inches='tight')
+            plt.close('all')
+            #STOP (this is for iPython)    
+            ind = ind + 1
+
+print 'Loop is done!'
